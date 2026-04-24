@@ -1,65 +1,135 @@
-import Image from "next/image";
+import Link from "next/link";
+import { supabasePublic, type NewsItem, type RoutineRun } from "@/lib/supabase";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+
+const SOURCE_LABEL: Record<string, string> = {
+  "changelog": "Claude Code",
+  "anthropic-news": "Anthropic",
+  "techcrunch-ai": "TechCrunch",
+  "hn-24h": "Hacker News",
+};
+
+function fmt(d: string) {
+  return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: "Asia/Taipei" })
+    .format(new Date(d));
+}
+
+export default async function HomePage() {
+  const supabase = supabasePublic();
+
+  if (!supabase) {
+    return (
+      <div className="max-w-3xl mx-auto px-6 py-16 text-center text-slate-500">
+        <h1 className="text-2xl text-slate-900 mb-3">Site up — waiting for Supabase credentials</h1>
+        <p className="text-sm">
+          Once Mark pastes <code className="bg-slate-100 px-1 py-0.5 rounded">SUPABASE_URL</code> +
+          {" "}<code className="bg-slate-100 px-1 py-0.5 rounded">SUPABASE_ANON_KEY</code> into Vercel env,
+          today&apos;s 4 picks will appear here.
+        </p>
+      </div>
+    );
+  }
+
+  const { data: runData } = await supabase
+    .from("routine_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(1);
+  const latestRun = runData?.[0] as RoutineRun | undefined;
+
+  const newsDate = latestRun?.news_date ?? new Date().toISOString().slice(0, 10);
+
+  const { data: itemsData } = await supabase
+    .from("news_items")
+    .select("*")
+    .eq("news_date", newsDate)
+    .order("rank", { ascending: true });
+  const items = (itemsData ?? []) as NewsItem[];
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="max-w-5xl mx-auto px-6 py-10">
+      <section className="mb-8">
+        <div className="flex items-baseline justify-between flex-wrap gap-3">
+          <h1 className="text-3xl font-semibold tracking-tight">
+            <span className="text-slate-900">Today&apos;s digest</span>
+            <span className="text-slate-500 ml-3 text-base font-normal">· {newsDate}</span>
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+          {latestRun && (
+            <Link
+              href={`/runs/${latestRun.run_id}`}
+              className="text-sm text-slate-600 hover:text-slate-900 underline decoration-dotted"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              see how this was picked →
+            </Link>
+          )}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        {latestRun && (
+          <div className="mt-2 text-xs text-slate-500">
+            Last run: <span className={statusColor(latestRun.status)}>{latestRun.status}</span>
+            {" · "}ID <code className="font-mono">{latestRun.run_id}</code>
+            {" · "}
+            {latestRun.finished_at
+              ? `${Math.round((new Date(latestRun.finished_at).getTime() - new Date(latestRun.started_at).getTime()) / 1000)}s`
+              : "in progress"}
+          </div>
+        )}
+      </section>
+
+      {items.length === 0 ? (
+        <div className="border border-dashed border-slate-300 rounded-lg p-10 text-center text-slate-500">
+          <p className="text-sm">No news items yet for {newsDate}.</p>
+          <p className="text-xs mt-2">The next Routine run fires at 08:00 Asia/Taipei.</p>
         </div>
-      </main>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {items.map((item) => (
+            <NewsCard key={item.id} item={item} />
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+function statusColor(status: string) {
+  switch (status) {
+    case "succeeded":
+      return "text-emerald-600";
+    case "degraded":
+      return "text-amber-600";
+    case "failed":
+      return "text-rose-600";
+    default:
+      return "text-slate-500";
+  }
+}
+
+function NewsCard({ item }: { item: NewsItem }) {
+  return (
+    <article
+      data-news-card={item.rank}
+      className="rounded-lg border border-slate-200 p-5 hover:border-slate-300 transition-colors"
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+          #{item.rank} · {SOURCE_LABEL[item.source_name] || item.source_name}
+        </span>
+        {item.score != null && (
+          <span className="text-[10px] font-mono text-slate-400">score {item.score}</span>
+        )}
+      </div>
+      <h2 className="text-lg font-semibold leading-snug mb-1">
+        <a href={item.url} target="_blank" rel="noreferrer" className="hover:underline">
+          {item.title_en}
+        </a>
+      </h2>
+      <h3 className="text-sm text-slate-600 mb-3">{item.title_zh}</h3>
+      <p className="text-sm text-slate-700 leading-relaxed mb-2">{item.summary_en}</p>
+      <p className="text-xs text-slate-500 leading-relaxed">{item.summary_zh}</p>
+      {item.published_at && (
+        <p className="mt-3 text-[10px] text-slate-400 font-mono">{fmt(item.published_at)}</p>
+      )}
+    </article>
   );
 }
