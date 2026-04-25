@@ -1,83 +1,83 @@
-# routines/daily.md — Claude Code Routine spec
+# routines/daily.md — Claude Code Routine spec (v2 · trigger model)
 
 **Routine name:** `daily-news`
 **Schedule:** `0 0 * * *` UTC = **08:00 Asia/Taipei daily**
 **Quota:** 1/day against Max plan's 15/day
-**Purpose:** Fetch + rank + translate + persist the day's 4 AI-coding news items to Supabase.
+**Purpose:** Trigger the Vercel-hosted daily news pipeline; the pipeline does fetch + score + translate + persist.
 
-**Paired executable:** `routines/daily-runner.mjs`(the local-runnable equivalent · same logic,no Routines-cloud orchestration)
+**Architecture pivot (v2 · 2026-04-25):** Routines cloud egress allowlist blocks Supabase, Azure, and the news sources themselves (only `raw.githubusercontent.com` is reachable). The routine no longer does the work — it triggers `POST /api/routine/run-daily` on Vercel, which has no outbound restrictions. The Vercel handler runs the full pipeline (Azure OpenAI scoring + Azure Translator + Supabase writes) and writes all `routine_log_entries` server-side, so the `/runs/[id]` log UI is unaffected.
 
-**Ranking spec:** `../../spec/003/news-ranking.md`
+**Paired executable:** `routines/daily-runner.mjs` — local-runnable equivalent of the same pipeline (Phase 1 fallback if Vercel is down).
 
----
-
-## Secrets required in Routines console
-
-- `SUPABASE_URL` — `https://<project-ref>.supabase.co`
-- `SUPABASE_SERVICE_ROLE_KEY` — from Supabase dashboard · project settings · API · service_role
-- `ANTHROPIC_API_KEY` — for the Opus scoring calls inside the routine
+**Pipeline source:** `src/lib/daily-pipeline.ts` (TS port of daily-runner.mjs, the canonical Vercel-side implementation).
 
 ---
 
-## Routine prompt(paste into Routines console)
+## Allowlist requirement (cloud env `daily-news-env`)
 
-> **Note:** the actual executable lives in `routines/daily-runner.mjs`. This prompt is for Routines cloud to run the equivalent logic using WebSearch + WebFetch + direct Supabase REST calls.
+Only **one** non-default host needs to be on the routine env's Custom network allowlist:
 
 ```
-You are the `daily-news` routine for showcase-003-daily-news. Your job:
-fetch AI-coding news from 4 sources, score them per spec/003/news-ranking.md,
-translate the 4 winners to Traditional Chinese, and persist everything to
-Supabase along with a full execution log.
-
-RUN_ID = today's ISO date + "-auto" (e.g. "2026-04-25-auto")
-
-Step 1 — INIT: insert a routine_runs row with status="running", source_type="routine_cloud",
-news_date=today.
-
-Step 2 — For each of these 4 sources, in order:
-  a. source="changelog"       fetch https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
-  b. source="anthropic-news"  fetch https://www.anthropic.com/news
-  c. source="techcrunch-ai"   fetch https://techcrunch.com/category/artificial-intelligence/feed/
-  d. source="hn-24h"          fetch https://hn.algolia.com/api/v1/search?tags=story&numericFilters=created_at_i>{24h_ago}
-
-  For EACH source:
-    - INSERT a routine_log_entries row with phase="fetch", tool="WebFetch",
-      input={url}, output={truncated response snippet}, duration_ms=<measured>.
-    - Extract candidate items from the fetched content.
-    - For each candidate, call Claude Opus with the valuableness prompt in
-      spec/003/news-ranking.md §Appendix A. Compute score = 0.4*recency + 0.6*valuableness.
-    - INSERT a routine_log_entries row with phase="score", intent="rank <source>",
-      output={candidates:[{title,score}]}, decision="pick top 1: <title>".
-    - Keep the top 1.
-
-Step 3 — AGGREGATE: combine the 4 picks (one per source).
-  - Apply dedup rule from spec/003 §Rule 2 (URL canonical + title cosine 0.85).
-  - If dedup leaves 4 → proceed with 4. If 3 → log warn_dedup_floor and proceed with 3.
-  - If < 3 → UPDATE routine_runs row with status="failed", failure_reason="dedup_floor_breach",
-    and STOP. Do NOT write to news_items.
-
-Step 4 — TRANSLATE: for each surviving pick, call Opus to produce Traditional Chinese
-title + summary (<=140 chars for title, <=250 for summary). Log one phase="translate"
-entry per item.
-
-Step 5 — PERSIST: INSERT N rows into news_items (rank=1..N by score descending),
-with run_id, news_date, source_name, title_en/zh, summary_en/zh, url, published_at, score.
-
-Step 6 — FINALIZE: UPDATE routine_runs row with status="succeeded" (or "degraded" if 3),
-items_produced=N, finished_at=now().
-
-At every step, if a source is unreachable after 3 retries with 30s backoff, log
-warn_source_unreachable and CONTINUE to next source. The run succeeds if >=2
-sources delivered picks.
+*.vercel.app
 ```
+
+Default list covers `api.anthropic.com`. Everything else (Supabase, Azure, news sources) is hit from Vercel, not the routine.
+
+---
+
+## Routine prompt (paste into Routines console)
+
+```
+You are the daily-news trigger for showcase-003-daily-news.
+
+Your only job: POST to the Vercel pipeline endpoint with the auth header,
+read the JSON response, and report.
+
+curl -sS -w "\n[HTTP %{http_code} · %{time_total}s]\n" \
+  -X POST "https://showcase-003-daily-news.vercel.app/api/routine/run-daily" \
+  -H "X-Routine-Secret: $ROUTINE_INGEST_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+The Vercel pipeline (src/lib/daily-pipeline.ts) does:
+  1. INSERT routine_runs row (status=running)
+  2. Fetch 4 sources: changelog · anthropic-news · techcrunch-ai · hn-24h
+  3. Score candidates per source via Azure OpenAI gpt-4o (0.4*recency + 0.6*valuableness)
+  4. Dedup → 4 picks (3 = degraded, <3 = failed)
+  5. Translate to zh-Hant via Azure Translator
+  6. INSERT 4 news_items + ~15-25 routine_log_entries
+  7. UPDATE routine_runs (status=succeeded|degraded|failed)
+
+Expected response on success:
+  {"ok":true,"run_id":"<YYYY-MM-DD>-auto","news_date":"<YYYY-MM-DD>",
+   "status":"succeeded"|"degraded","items_produced":3-4,"log_count":15-25,
+   "elapsed_ms":<N>}
+
+If HTTP != 200 or ok=false, print the response body verbatim and report failed.
+Do not retry — the Vercel handler has its own error handling and writes
+failed status to routine_runs even on pipeline error.
+
+Final console output:
+  ✓ daily-news triggered · run_id=<id> · status=<status> · items=<N> · elapsed=<ms>ms
+```
+
+---
+
+## Secrets required in cloud env
+
+- `ROUTINE_INGEST_SECRET` — shared secret (same one used by `/api/routine/ingest`); routine puts it in `X-Routine-Secret` header
+
+That's it. **No more Supabase URL / service key / Azure keys in the routine prompt.** All credentials live in Vercel env.
 
 ---
 
 ## What gets written to Supabase on a successful run
 
-- `routine_runs`: **1 row**(status=succeeded · items_produced=4 · duration ~30-90 sec)
-- `routine_log_entries`: **~15-25 rows**(4 fetch + 4 score + up to 4 translate + 1 aggregate + 1 persist + 1 finalize + warns)
-- `news_items`: **4 rows**(rank 1..4 for that `news_date`)
+(Unchanged from v1 — same tables, same shape, same `/runs/[id]` UI.)
+
+- `routine_runs`: **1 row** (status=succeeded · items_produced=4 · duration ~30-60 sec)
+- `routine_log_entries`: **~15-25 rows** (init + 4 fetch + 4 score + 1 aggregate + 1 translate + 1 persist + 1 finalize)
+- `news_items`: **4 rows** (rank 1..4 for that `news_date`)
 
 ---
 
@@ -88,27 +88,27 @@ sources delivered picks.
 | All 4 sources OK, 4 picks after dedup | `succeeded` | 4 rows | 2×2 grid full |
 | Dedup reduces to 3 | `degraded` | 3 rows | 3-card layout · warn 標在頁面一角 |
 | < 3 picks after all retry | `failed` | 0 rows | 首頁顯示前一天的 items + `失敗原因` 區塊 |
-| 1 source down | `succeeded`(if other 3 make 4 picks via internal rank, unusual)or `degraded` | 3-4 | 標該 source 灰 |
+| Pipeline throws unhandled | `failed` | 0 rows | failure_reason recorded; routine logs HTTP 500 body |
 
 ---
 
-## Local-equivalent execution (Phase 1)
+## Local-equivalent execution (Phase 1 fallback)
 
 ```bash
-# Phase 1 (tonight) — run locally against the same Supabase instance
+# Same logic, no Routines cloud — useful when Vercel/Supabase is being changed
 export SUPABASE_URL=...
 export SUPABASE_SERVICE_ROLE_KEY=...
-export ANTHROPIC_API_KEY=...
-node routines/daily-runner.mjs --run-id "2026-04-24-manual"
+export AZURE_OPENAI_ENDPOINT=...
+export AZURE_OPENAI_KEY=...
+export AZURE_TRANSLATOR_KEY=...
+node routines/daily-runner.mjs --run-id "2026-04-25-manual"
 ```
-
-When the cloud Routine later fires, it does the same steps with `--run-id "2026-04-25-auto"`. Both write to the same Supabase; the site shows whichever is latest by `started_at`.
 
 ---
 
 ## Authoring protocol
 
 This file's editing rules inherit from `../../spec/001/build-md-authoring.md`:
-- snapshot-before-revise for source bugs(rename old to `daily-<YYYY-MM-DD_HHMMSS>.md`)
+- snapshot-before-revise for source bugs (rename old to `daily-<YYYY-MM-DD_HHMMSS>.md`)
 - positive-confirmation for retry loops
 - no `grep -q <magic-string>` against evolving stdout
