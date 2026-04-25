@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "env:pull": "vercel env pull .env.local --environment=production --yes",
+    "trigger:smoke": "node -r dotenv/config scripts/smoke-trigger.mjs dotenv_config_path=.env.local"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
@@ -19,6 +21,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.4.2",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
