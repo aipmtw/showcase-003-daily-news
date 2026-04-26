@@ -41,16 +41,20 @@ curl -sS -w "\n[HTTP %{http_code} · %{time_total}s]\n" \
 
 The Vercel pipeline (src/lib/daily-pipeline.ts) does:
   1. INSERT routine_runs row (status=running)
-  2. Fetch 4 sources: changelog · anthropic-news · techcrunch-ai · hn-24h
+  2. Fetch 3 internet sources: anthropic-news · techcrunch-ai · hn-24h
   3. Score candidates per source via Azure OpenAI gpt-4o (0.4*recency + 0.6*valuableness)
-  4. Dedup → 4 picks (3 = degraded, <3 = failed)
+  4. Dedup → up to 3 picks (2 = degraded, <2 = failed)
   5. Translate to zh-Hant via Azure Translator
-  6. INSERT 4 news_items + ~15-25 routine_log_entries
+  6. INSERT 2-3 news_items + ~12-20 routine_log_entries
   7. UPDATE routine_runs (status=succeeded|degraded|failed)
+
+(The Anthropic CHANGELOG source was dropped 2026-04-26 — it doesn't update
+daily, so the same release-bullet kept winning the score and repeating
+across days. The pipeline now focuses on internet news that moves day-to-day.)
 
 Expected response on success:
   {"ok":true,"run_id":"<YYYY-MM-DD>-auto","news_date":"<YYYY-MM-DD>",
-   "status":"succeeded"|"degraded","items_produced":3-4,"log_count":15-25,
+   "status":"succeeded"|"degraded","items_produced":2-3,"log_count":12-20,
    "elapsed_ms":<N>}
 
 If HTTP != 200 or ok=false, print the response body verbatim and report failed.
@@ -73,11 +77,12 @@ That's it. **No more Supabase URL / service key / Azure keys in the routine prom
 
 ## What gets written to Supabase on a successful run
 
-(Unchanged from v1 — same tables, same shape, same `/runs/[id]` UI.)
+Same tables / shape / `/runs/[id]` UI; only the counts shrink with the
+3-source pipeline.
 
-- `routine_runs`: **1 row** (status=succeeded · items_produced=4 · duration ~30-60 sec)
-- `routine_log_entries`: **~15-25 rows** (init + 4 fetch + 4 score + 1 aggregate + 1 translate + 1 persist + 1 finalize)
-- `news_items`: **4 rows** (rank 1..4 for that `news_date`)
+- `routine_runs`: **1 row** (status=succeeded · items_produced=3 · duration ~15-30 sec)
+- `routine_log_entries`: **~12-20 rows** (init + 3 fetch + 3 score + 1 aggregate + 1 translate + 1 persist + 1 finalize)
+- `news_items`: **3 rows** (rank 1..3 for that `news_date`)
 
 ---
 
@@ -85,9 +90,9 @@ That's it. **No more Supabase URL / service key / Azure keys in the routine prom
 
 | Situation | Run status | news_items | Site behavior |
 |---|---|---|---|
-| All 4 sources OK, 4 picks after dedup | `succeeded` | 4 rows | 2×2 grid full |
-| Dedup reduces to 3 | `degraded` | 3 rows | 3-card layout · warn 標在頁面一角 |
-| < 3 picks after all retry | `failed` | 0 rows | 首頁顯示前一天的 items + `失敗原因` 區塊 |
+| All 3 sources OK, 3 unique picks after dedup | `succeeded` | 3 rows | full 3-card row |
+| Dedup or one source fail reduces to 2 | `degraded` | 2 rows | 2-card layout |
+| < 2 picks after all retry | `failed` | 0 rows | 首頁顯示前一天的 items + `失敗原因` 區塊 |
 | Pipeline throws unhandled | `failed` | 0 rows | failure_reason recorded; routine logs HTTP 500 body |
 
 ---

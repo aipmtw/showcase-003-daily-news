@@ -147,44 +147,9 @@ async function initRun() {
   });
 }
 
-// ── Step 2 — FETCH 4 sources ──────────────────────────────────────
-
-async function fetchChangelog() {
-  const url = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
-  const { result: text, duration_ms } = await timed(async () => {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.text();
-  });
-  await log("fetch", {
-    intent: "fetch Claude Code CHANGELOG",
-    tool: "fetch",
-    input: { url },
-    output: { bytes: text.length },
-    duration_ms,
-  });
-  const releases = text.split(/^## /m).slice(1, 4);
-  const candidates = [];
-  for (const rel of releases) {
-    const versionLine = rel.split("\n")[0].trim();
-    const bullets = rel
-      .split("\n")
-      .filter((l) => l.startsWith("- "))
-      .slice(0, 3)
-      .map((l) => l.replace(/^- /, "").trim());
-    for (const b of bullets) {
-      candidates.push({
-        source: "changelog",
-        title: b.length > 140 ? b.slice(0, 137) + "…" : b,
-        summary: b,
-        url: `https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#${versionLine.toLowerCase().replace(/\./g, "")}`,
-        published_at: null,
-        recency_hint: 1.0,
-      });
-    }
-  }
-  return candidates;
-}
+// ── Step 2 — FETCH 3 internet sources ─────────────────────────────
+// (Anthropic CHANGELOG dropped 2026-04-26 — same release-bullet kept
+//  winning daily and repeating. We focus on news that moves day-to-day.)
 
 async function fetchAnthropicNews() {
   const url = "https://www.anthropic.com/news";
@@ -422,7 +387,6 @@ try {
   await initRun();
 
   const sources = [
-    { name: "changelog", fn: fetchChangelog },
     { name: "anthropic-news", fn: fetchAnthropicNews },
     { name: "techcrunch-ai", fn: fetchTechcrunchAi },
     { name: "hn-24h", fn: fetchHn24h },
@@ -451,23 +415,23 @@ try {
   await log("aggregate", {
     intent: "aggregate + dedup picks across sources",
     output: { sources_delivered: picks.length, after_dedup: deduped.length },
-    decision: deduped.length < 3
-      ? "FAILED — dedup floor breach (<3)"
-      : deduped.length === 3
-        ? "DEGRADED — dedup floor reached 3"
-        : "OK — 4 unique picks",
-    level: deduped.length < 3 ? "error" : deduped.length === 3 ? "warn" : "info",
+    decision: deduped.length < 2
+      ? "FAILED — dedup floor breach (<2)"
+      : deduped.length < 3
+        ? "DEGRADED — fewer than 3 unique picks"
+        : "OK — 3 unique picks",
+    level: deduped.length < 2 ? "error" : deduped.length < 3 ? "warn" : "info",
   });
 
-  if (deduped.length < 3) {
+  if (deduped.length < 2) {
     await finalize("failed", 0, "dedup_floor_breach");
     process.exit(1);
   }
 
-  const translated = await translateAll(deduped.slice(0, 4));
+  const translated = await translateAll(deduped.slice(0, 3));
   await persist(translated);
 
-  const status = translated.length === 4 ? "succeeded" : "degraded";
+  const status = translated.length === 3 ? "succeeded" : "degraded";
   await finalize(status, translated.length);
 
   const totalMs = Date.now() - overallStart;

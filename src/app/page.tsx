@@ -4,10 +4,12 @@ import { supabasePublic, type NewsItem, type RoutineRun } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 
 const SOURCE_LABEL: Record<string, string> = {
-  "changelog": "Claude Code",
   "anthropic-news": "Anthropic",
   "techcrunch-ai": "TechCrunch",
   "hn-24h": "Hacker News",
+  // Legacy label retained so historical news_items rows pre-2026-04-26 still
+  // render with their pretty source name on the archive view.
+  "changelog": "Claude Code",
 };
 
 function fmt(d: string) {
@@ -25,7 +27,7 @@ export default async function HomePage() {
         <p className="text-sm">
           Once Mark pastes <code className="bg-slate-100 px-1 py-0.5 rounded">SUPABASE_URL</code> +
           {" "}<code className="bg-slate-100 px-1 py-0.5 rounded">SUPABASE_ANON_KEY</code> into Vercel env,
-          today&apos;s 4 picks will appear here.
+          today&apos;s 3 picks will appear here.
         </p>
       </div>
     );

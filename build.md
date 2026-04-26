@@ -14,7 +14,7 @@
 ## 0. Product at a glance
 
 **`https://daily.aipm.com.tw`**(custom)/ **`showcase-003-daily-news.vercel.app`**(預設)
-Top-of-fold: **today's 4 news items**(2×2 grid,EN title + zh 翻譯 + source badge + publish date + 2 行 summary)
+Top-of-fold: **today's 3 news items**(responsive 1/2-col grid,EN title + zh 翻譯 + source badge + publish date + 2 行 summary)
 Navigation: `/` today · `/runs/[id]` routine execution log · `/archive` calendar of past days
 Data: Supabase Postgres · 3 tables(`news_items` · `routine_runs` · `routine_log_entries`)
 Automation: Claude Code Routine fires at 08:00 Asia/Taipei daily · `routines/daily-runner.mjs` is the canonical script
@@ -240,7 +240,7 @@ export function supabaseAdmin() {
 
 | Route | SSR data source | Purpose |
 |---|---|---|
-| `/` | `news_items` where `news_date = today` | 2×2 grid of today's 4 picks · lang toggle |
+| `/` | `news_items` where `news_date = today` | grid of today's 3 picks · EN + zh 雙語並列 |
 | `/runs/[id]` | `routine_runs` + `routine_log_entries` | Per-run execution log · 時間戳逐行 |
 | `/archive` | `news_items` group by `news_date` | Calendar view, click date → see that day's 4 |
 | `/api/health` | `SELECT count(*) FROM news_items` | `{status, counts:{runs, items, latest_date}}` |
@@ -312,10 +312,10 @@ SITE="${SITE:-https://showcase-003-daily-news.vercel.app}"
 # E.1  /api/health
 curl -sf "$SITE/api/health" | jq -e '.status=="ok" and .counts.runs>=1'
 
-# E.2  Today's 4 cards on homepage
+# E.2  Today's 3 cards on homepage
 HOME=$(curl -sf "$SITE/")
 CARDS=$(echo "$HOME" | grep -oE 'data-news-card="[0-9]+"' | wc -l)
-[ "$CARDS" -ge 3 ]   # 4 is the target; 3 is the dedup-floor acceptable
+[ "$CARDS" -ge 2 ]   # 3 is the target; 2 is the dedup-floor acceptable
 
 # E.3  Latest routine_runs row is visible at /runs/[latest]
 LATEST=$(curl -sf "$SITE/api/runs/latest" | jq -r '.run_id')
@@ -356,7 +356,7 @@ supabase db execute --stdin <<< "select count(*) - count(distinct (news_date, ra
 |---|---|---|
 | Vercel | Hobby (free) | $0 |
 | Supabase | Free tier (500 MB / 2 GB egress) | $0 |
-| Anthropic API (Opus scoring ~4 calls/day × 4 sources × small ctx) | ~$0.10/day | ~$3 |
+| Azure OpenAI (gpt-4o scoring ~4 calls/day × 3 sources × small ctx) | trivial | sponsorship |
 | Claude Routines | Max plan included (15/day quota) | $0 incremental |
 | **Total** | | **~$3/month** |
 

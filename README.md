@@ -12,7 +12,7 @@
 ---
 
 ## 一句話
-**每天凌晨 08:00(Asia/Taipei)由 Claude Code Routine 自動上網抓 4 則 Claude Code + AI coding 新聞,英文原文 + 繁中翻譯入庫,網站展示當日 digest + 歷史 archive + 當日 routine 完整執行 log。**
+**每天凌晨 08:00(Asia/Taipei)由 Claude Code Routine 自動上網抓 3 則 AI coding 新聞(Anthropic / TechCrunch AI / Hacker News 24h),英文原文 + 繁中翻譯入庫,網站展示當日 digest + 歷史 archive + 當日 routine 完整執行 log。**
 
 ## 敘事核心
 評審打開 `daily.aipm.com.tw` 不只看到「當日新聞」,還能點進 `/runs/<run_id>` 看昨晚 08:00 Claude 是**怎麼搜尋、排名、翻譯、寫入**的。每一個工具呼叫、每一個判斷、每一次失敗重試,都以時間戳逐行呈現。**自動化從後台黑盒變成公開可觀測的表演。**
@@ -41,16 +41,19 @@
 08:00 TPE
   ↓  Claude Code Routine fires
   ↓  INSERT routine_runs row (status=running)
-  ↓  FOR source IN [CHANGELOG, anthropic-news, TC AI, HN 24h]:
-  ↓    WebSearch / WebFetch source
+  ↓  FOR source IN [anthropic-news, TC AI, HN 24h]:
+  ↓    WebFetch source
   ↓    INSERT routine_log_entries(phase, intent, tool, input, output, decision, duration_ms)
   ↓    Rule 2 score candidates → pick top 1
-  ↓  Aggregate 4 picks (dedup · fall back to 3 if needed)
+  ↓  Aggregate 3 picks (dedup · fall back to 2 if needed)
   ↓  Translate EN → zh-Hant
-  ↓  INSERT 4 news_items rows
-  ↓  UPDATE routine_runs row (status=succeeded, items_produced=4)
+  ↓  INSERT up to 3 news_items rows
+  ↓  UPDATE routine_runs row (status=succeeded, items_produced=3)
   ↓
-08:00:~30s TPE — 網站首頁自動顯示當日 4 則
+08:00:~30s TPE — 網站首頁自動顯示當日 3 則
+
+歷史:CHANGELOG source dropped 2026-04-26 — release notes 不每天更新,
+top-scored bullet 連續多天重複出現於 archive,改為純 internet news 來源。
 ```
 
 ## 與 001 的基礎建設共用

@@ -4,8 +4,13 @@
 // can trigger us via /api/routine/run-daily and we do all the work here
 // (Routines cloud egress allowlist blocks most hosts; Vercel has none).
 //
-// Pipeline: fetch 4 sources → score (Azure OpenAI gpt-4o) → dedup
-// → translate (Azure Translator) → persist to Supabase + write log_entries.
+// Pipeline: fetch 3 internet sources (anthropic-news, techcrunch-ai, hn-24h)
+// → score (Azure OpenAI gpt-4o) → dedup → translate (Azure Translator)
+// → persist to Supabase + write log_entries.
+//
+// (The Anthropic CHANGELOG source was dropped 2026-04-26 — it doesn't update
+// daily, so the same release-bullet kept winning the score and repeating
+// across days. We focus on internet news that actually moves day-to-day.)
 //
 // Logs every phase to routine_log_entries so /runs/[id] still tells the
 // full story even though the routine session itself only fired a curl.
@@ -87,34 +92,6 @@ async function azureTranslate(texts: string[]): Promise<string[]> {
 }
 
 // ── Sources ──────────────────────────────────────────────────────
-
-async function fetchChangelog(): Promise<Candidate[]> {
-  const url = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`changelog HTTP ${r.status}`);
-  const text = await r.text();
-  const releases = text.split(/^## /m).slice(1, 4);
-  const out: Candidate[] = [];
-  for (const rel of releases) {
-    const versionLine = rel.split("\n")[0].trim();
-    const bullets = rel
-      .split("\n")
-      .filter((l) => l.startsWith("- "))
-      .slice(0, 3)
-      .map((l) => l.replace(/^- /, "").trim());
-    for (const b of bullets) {
-      out.push({
-        source: "changelog",
-        title: b.length > 140 ? b.slice(0, 137) + "…" : b,
-        summary: b,
-        url: `https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#${versionLine.toLowerCase().replace(/\./g, "")}`,
-        published_at: null,
-        recency_hint: 1.0,
-      });
-    }
-  }
-  return out;
-}
 
 async function fetchAnthropicNews(): Promise<Candidate[]> {
   const url = "https://www.anthropic.com/news";
@@ -243,9 +220,8 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     decision: `run_id=${runId}, news_date=${newsDate}, source_type=${sourceType}`,
   });
 
-  // 2. FETCH 4 sources in parallel
+  // 2. FETCH 3 internet sources in parallel
   const sourceDefs = [
-    { name: "changelog", fn: fetchChangelog },
     { name: "anthropic-news", fn: fetchAnthropicNews },
     { name: "techcrunch-ai", fn: fetchTechcrunchAi },
     { name: "hn-24h", fn: fetchHn24h },
@@ -327,15 +303,15 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     intent: "aggregate + dedup picks across sources",
     output: { sources_delivered: picks.length, after_dedup: deduped.length },
     decision:
-      deduped.length < 3
-        ? "FAILED — dedup floor breach (<3)"
-        : deduped.length === 3
-          ? "DEGRADED — dedup floor reached 3"
-          : "OK — 4 unique picks",
-    level: deduped.length < 3 ? "error" : deduped.length === 3 ? "warn" : "info",
+      deduped.length < 2
+        ? "FAILED — dedup floor breach (<2)"
+        : deduped.length < 3
+          ? "DEGRADED — fewer than 3 unique picks"
+          : "OK — 3 unique picks",
+    level: deduped.length < 2 ? "error" : deduped.length < 3 ? "warn" : "info",
   });
 
-  if (deduped.length < 3) {
+  if (deduped.length < 2) {
     await supabase
       .from("routine_runs")
       .update({
@@ -350,7 +326,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
   }
 
   // 5. TRANSLATE
-  const finalPicks = deduped.slice(0, 4);
+  const finalPicks = deduped.slice(0, 3);
   {
     const { result: translated, duration_ms } = await timed(async () => {
       const titles = finalPicks.map((p) => p.title);
@@ -397,7 +373,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
   });
 
   // 7. FINALIZE
-  const status: "succeeded" | "degraded" = finalPicks.length === 4 ? "succeeded" : "degraded";
+  const status: "succeeded" | "degraded" = finalPicks.length === 3 ? "succeeded" : "degraded";
   await supabase
     .from("routine_runs")
     .update({
