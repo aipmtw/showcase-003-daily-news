@@ -42,6 +42,11 @@ export type RoutineRun = {
   news_date: string;
   failure_reason: string | null;
   notes: string | null;
+  // 2026-04-26: meta-narrative across the day's picks (drives the
+  // "今日整體判讀" panel on the homepage). Same shape as 004 — both
+  // showcases share the schema since the Supabase project is shared.
+  daily_summary_en: string | null;
+  daily_summary_zh: string | null;
 };
 
 export type RoutineLogEntry = {

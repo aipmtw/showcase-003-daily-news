@@ -1,16 +1,17 @@
 // src/lib/daily-pipeline.ts — server-side daily news pipeline.
 //
-// Port of routines/daily-runner.mjs into the Next.js runtime so the routine
-// can trigger us via /api/routine/run-daily and we do all the work here
-// (Routines cloud egress allowlist blocks most hosts; Vercel has none).
-//
-// Pipeline: fetch 3 internet sources (anthropic-news, techcrunch-ai, hn-24h)
-// → score (Azure OpenAI gpt-4o) → dedup → translate (Azure Translator)
+// Pipeline: fetch 6 sources → score (gpt-4o) → global rank → top 6-8
+// → bidirectional translate (zh-Hant ⇄ en) → daily synthesis paragraph
 // → persist to Supabase + write log_entries.
 //
-// (The Anthropic CHANGELOG source was dropped 2026-04-26 — it doesn't update
-// daily, so the same release-bullet kept winning the score and repeating
-// across days. We focus on internet news that actually moves day-to-day.)
+// 2026-04-26 expansion (mirroring 004): added 3 sources (The Verge AI,
+// INSIDE 硬塞, Lobsters AI tag), bumped target from 3 → 6 (max 8),
+// bidirectional translate so 繁中 RSS sources don't lose their original
+// zh, and a daily synthesis banner on top of the homepage.
+//
+// zh-Hant policy: gpt-4o produces English only; Translator does the
+// en → zh-Hant pass (gpt-4o leaks Simplified — see backlog/2026-04-26-
+// zh-hant-strict.md).
 //
 // Logs every phase to routine_log_entries so /runs/[id] still tells the
 // full story even though the routine session itself only fired a curl.
@@ -27,8 +28,14 @@ type Candidate = {
   url: string;
   published_at: string | null;
   recency_hint: number;
+  // 繁中 RSS sources (INSIDE / iThome / etc.) carry zh natively; we then
+  // translate zh → en for the English fields. en-native sources (HN, Verge,
+  // TechCrunch, Anthropic, Lobsters) translate en → zh-Hant.
+  native_zh?: { title?: string; summary?: string };
   score_valuable?: number;
   score_final?: number;
+  title_en?: string;
+  summary_en?: string;
   title_zh?: string;
   summary_zh?: string;
 };
@@ -72,12 +79,12 @@ function azureOpenAIChat(messages: Array<{ role: string; content: string }>, max
   });
 }
 
-async function azureTranslate(texts: string[]): Promise<string[]> {
+async function azureTranslate(texts: string[], to: "zh-Hant" | "en" = "zh-Hant"): Promise<string[]> {
   const key = process.env.AZURE_TRANSLATOR_KEY;
   const region = process.env.AZURE_TRANSLATOR_REGION || "southeastasia";
   const ep = process.env.AZURE_TRANSLATOR_ENDPOINT || "https://api.cognitive.microsofttranslator.com";
   if (!key) throw new Error("AZURE_TRANSLATOR_KEY required");
-  const url = `${ep.replace(/\/$/, "")}/translate?api-version=3.0&from=en&to=zh-Hant`;
+  const url = `${ep.replace(/\/$/, "")}/translate?api-version=3.0&to=${to}`;
   const r = await fetch(url, {
     method: "POST",
     headers: {
@@ -93,6 +100,41 @@ async function azureTranslate(texts: string[]): Promise<string[]> {
 }
 
 // ── Sources ──────────────────────────────────────────────────────
+
+const AI_CODING_KEYWORDS =
+  /claude|anthropic|copilot|cursor|codex|gpt|llm|coding agent|ai coding|mcp|model context protocol|agentic|开发|開發|程式碼|程序员|工程師|軟體開發|軟件開發|代码|大模型|生成式|prompt|aider|tabnine|sourcegraph|llama|gemini|deepseek|mistral|grok/i;
+
+// Generic RSS parser — same shape as 004's. Pulls <item><title><link><description><pubDate>.
+function parseRssItems(xml: string, source: string, opts?: { native_zh?: boolean; max?: number }): Candidate[] {
+  const max = opts?.max ?? 25;
+  const out: Candidate[] = [];
+  const itemRe = /<item[^>]*>([\s\S]*?)<\/item>/g;
+  let m: RegExpExecArray | null;
+  while ((m = itemRe.exec(xml)) !== null && out.length < max) {
+    const block = m[1];
+    const grab = (tag: string) => {
+      const r = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`));
+      return r ? r[1].replace(/<[^>]+>/g, "").trim() : "";
+    };
+    const title = grab("title");
+    const link = grab("link");
+    const desc = grab("description").slice(0, 400);
+    const pub = grab("pubDate") || grab("dc:date");
+    if (!title || !link) continue;
+    const pubDate = pub ? new Date(pub).getTime() : NaN;
+    const ageDays = Number.isFinite(pubDate) ? (Date.now() - pubDate) / 86400_000 : 5;
+    out.push({
+      source,
+      title,
+      summary: desc || title,
+      url: link,
+      published_at: Number.isFinite(pubDate) ? new Date(pubDate).toISOString() : null,
+      recency_hint: Math.max(0, 1 - ageDays / 5),
+      native_zh: opts?.native_zh ? { title, summary: desc || title } : undefined,
+    });
+  }
+  return out;
+}
 
 async function fetchAnthropicNews(): Promise<Candidate[]> {
   const url = "https://www.anthropic.com/news";
@@ -153,9 +195,8 @@ async function fetchHn24h(): Promise<Candidate[]> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`hn HTTP ${r.status}`);
   const j = (await r.json()) as { hits?: Array<{ title: string; url: string | null; objectID: string; created_at_i: number; points: number; num_comments: number }> };
-  const keywords = /claude|anthropic|copilot|ai coding|coding agent|mcp|cursor|codex|openai|llm/i;
   return (j.hits || [])
-    .filter((h) => h.title && keywords.test(h.title + " " + (h.url || "")))
+    .filter((h) => h.title && AI_CODING_KEYWORDS.test(h.title + " " + (h.url || "")))
     .map((h) => {
       const ageDays = (Date.now() - h.created_at_i * 1000) / 86400000;
       return {
@@ -167,6 +208,33 @@ async function fetchHn24h(): Promise<Candidate[]> {
         recency_hint: Math.max(0, 1 - ageDays),
       } as Candidate;
     });
+}
+
+async function fetchVergeAi(): Promise<Candidate[]> {
+  const url = "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml";
+  const r = await fetch(url, { headers: { "User-Agent": "daily-news-routine/1.0" } });
+  if (!r.ok) throw new Error(`verge HTTP ${r.status}`);
+  const xml = await r.text();
+  return parseRssItems(xml, "verge-ai", { max: 20 });
+}
+
+async function fetchInsideTw(): Promise<Candidate[]> {
+  // INSIDE 硬塞的網路趨勢觀察 — Taiwan tech blog, AI-heavy
+  const url = "https://www.inside.com.tw/feed";
+  const r = await fetch(url, { headers: { "User-Agent": "daily-news-routine/1.0" } });
+  if (!r.ok) throw new Error(`inside HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = parseRssItems(xml, "inside-tw", { native_zh: true, max: 30 });
+  return items.filter((c) => AI_CODING_KEYWORDS.test(c.title + " " + c.summary));
+}
+
+async function fetchLobstersAi(): Promise<Candidate[]> {
+  // Lobsters AI tag — curated alternative to HN
+  const url = "https://lobste.rs/t/ai.rss";
+  const r = await fetch(url, { headers: { "User-Agent": "daily-news-routine/1.0" } });
+  if (!r.ok) throw new Error(`lobsters HTTP ${r.status}`);
+  const xml = await r.text();
+  return parseRssItems(xml, "lobsters-ai", { max: 20 });
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────
@@ -227,11 +295,14 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     decision: `run_id=${runId}, news_date=${newsDate}, source_type=${sourceType}`,
   });
 
-  // 2. FETCH 3 internet sources in parallel
+  // 2. FETCH 6 sources in parallel
   const sourceDefs = [
     { name: "anthropic-news", fn: fetchAnthropicNews },
-    { name: "techcrunch-ai", fn: fetchTechcrunchAi },
-    { name: "hn-24h", fn: fetchHn24h },
+    { name: "techcrunch-ai",  fn: fetchTechcrunchAi },
+    { name: "hn-24h",         fn: fetchHn24h },
+    { name: "verge-ai",       fn: fetchVergeAi },
+    { name: "inside-tw",      fn: fetchInsideTw },
+    { name: "lobsters-ai",    fn: fetchLobstersAi },
   ];
   const fetched = await Promise.all(
     sourceDefs.map(async (s) => {
@@ -257,9 +328,11 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
   }
 
   // 3. SCORE — score TOP K candidates per source, then rank globally and take
-  // top 3 unique. Each source contributes K candidates (not 1 pick) so that if
-  // one source returns 0 (e.g. HTML drift), the others fill in to keep total=3.
-  // Hard requirement: every daily run must produce exactly 3 items.
+  // top TARGET_PICKS unique. With 6 sources each contributing K candidates,
+  // we have plenty of headroom even if 1-2 sources return 0.
+  const TARGET_PICKS = 6;   // aim
+  const MAX_PICKS = 8;      // cap
+  const MIN_PICKS = 3;      // below = failed
   const PER_SOURCE_K = 4;
   const allScored: Candidate[] = [];
   for (const f of fetched) {
@@ -301,8 +374,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     });
   }
 
-  // 4. AGGREGATE — global ranking, dedup by URL, take top 3.
-  // (Every source contributed K candidates above; we rank across all of them.)
+  // 4. AGGREGATE — global ranking, dedup by URL, take MAX, slice to TARGET.
   allScored.sort((a, b) => (b.score_final ?? 0) - (a.score_final ?? 0));
   const seen = new Set<string>();
   const deduped: Candidate[] = [];
@@ -311,26 +383,26 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(c);
-    if (deduped.length === 3) break;
+    if (deduped.length === MAX_PICKS) break;
   }
 
   await log("aggregate", {
-    intent: "global rank + dedup top 3 across all sources",
+    intent: `global rank + dedup top ${MAX_PICKS} across all sources`,
     output: {
       total_scored: allScored.length,
       after_dedup: deduped.length,
       sources_in_picks: [...new Set(deduped.map((d) => d.source))],
     },
     decision:
-      deduped.length === 3
-        ? "OK — 3 unique picks (target reached)"
-        : deduped.length === 2
-          ? "DEGRADED — only 2 unique candidates total across sources"
-          : "FAILED — fewer than 2 unique candidates",
-    level: deduped.length < 2 ? "error" : deduped.length < 3 ? "warn" : "info",
+      deduped.length >= TARGET_PICKS
+        ? `OK — ${deduped.length} unique picks (target=${TARGET_PICKS}, max=${MAX_PICKS})`
+        : deduped.length >= MIN_PICKS
+          ? `DEGRADED — ${deduped.length} unique picks (below target ${TARGET_PICKS})`
+          : `FAILED — only ${deduped.length} unique picks (below floor ${MIN_PICKS})`,
+    level: deduped.length < MIN_PICKS ? "error" : deduped.length < TARGET_PICKS ? "warn" : "info",
   });
 
-  if (deduped.length < 2) {
+  if (deduped.length < MIN_PICKS) {
     await supabase
       .from("routine_runs")
       .update({
@@ -345,41 +417,102 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     return { run_id: runId, news_date: newsDate, status: "failed", items_produced: 0, log_count: seq, elapsed_ms: Date.now() - startMs, failure_reason: "all_sources_empty_or_drift" };
   }
 
-  // 5. TRANSLATE
-  const finalPicks = deduped;
-  {
-    const { result: translated, duration_ms } = await timed(async () => {
-      const titles = finalPicks.map((p) => p.title);
-      const summaries = finalPicks.map((p) => String(p.summary).slice(0, 500));
-      const all = await azureTranslate([...titles, ...summaries]);
-      const titlesZh = all.slice(0, finalPicks.length);
-      const summariesZh = all.slice(finalPicks.length);
-      return finalPicks.map((p, i) => ({ ...p, title_zh: titlesZh[i], summary_zh: summariesZh[i] }));
-    });
-    for (let i = 0; i < finalPicks.length; i++) {
-      finalPicks[i].title_zh = translated[i].title_zh;
-      finalPicks[i].summary_zh = translated[i].summary_zh;
+  // Cap at TARGET_PICKS for the day (MAX is just dedup headroom).
+  const finalPicks = deduped.slice(0, Math.min(TARGET_PICKS, deduped.length));
+
+  // 5. TRANSLATE — bidirectional. zh-native sources (INSIDE 硬塞) translate
+  // zh → en for the English fields. en-native (HN, Anthropic, TechCrunch,
+  // Verge, Lobsters) translate en → zh-Hant.
+  const translateStart = Date.now();
+  const enToZh: Array<{ p: Candidate; field: "title" | "summary" }> = [];
+  const zhToEn: Array<{ p: Candidate; field: "title" | "summary" }> = [];
+  for (const p of finalPicks) {
+    if (p.native_zh) {
+      p.title_zh = p.title;
+      p.summary_zh = String(p.summary).slice(0, 500);
+      zhToEn.push({ p, field: "title" }, { p, field: "summary" });
+    } else {
+      p.title_en = p.title;
+      p.summary_en = String(p.summary).slice(0, 500);
+      enToZh.push({ p, field: "title" }, { p, field: "summary" });
     }
-    await log("translate", {
-      intent: `translate ${finalPicks.length} picks to zh-Hant`,
-      tool: "azure-translator",
-      input: { texts: finalPicks.length * 2, direction: "en→zh-Hant" },
-      output: { samples: translated.map((t) => (t.title_zh || "").slice(0, 60)) },
-      duration_ms,
+  }
+  if (enToZh.length) {
+    const texts = enToZh.map(({ p, field }) => (field === "title" ? p.title_en! : p.summary_en!));
+    const translated = await azureTranslate(texts, "zh-Hant");
+    enToZh.forEach(({ p, field }, i) => {
+      if (field === "title") p.title_zh = translated[i];
+      else p.summary_zh = translated[i];
     });
   }
+  if (zhToEn.length) {
+    const texts = zhToEn.map(({ p, field }) => (field === "title" ? p.title_zh! : p.summary_zh!));
+    const translated = await azureTranslate(texts, "en");
+    zhToEn.forEach(({ p, field }, i) => {
+      if (field === "title") p.title_en = translated[i];
+      else p.summary_en = translated[i];
+    });
+  }
+  await log("translate", {
+    intent: `bidirectional translate ${finalPicks.length} picks (en↔zh-Hant as needed)`,
+    tool: "azure-translator",
+    input: { en_to_zh: enToZh.length, zh_to_en: zhToEn.length },
+    duration_ms: Date.now() - translateStart,
+  });
 
-  // 6. PERSIST
+  // 6. DAILY SYNTHESIS — meta-narrative across picks. gpt-4o EN only;
+  // Translator does zh-Hant (per backlog/2026-04-26-zh-hant-strict.md).
+  let dailySummaryEn: string | null = null;
+  let dailySummaryZh: string | null = null;
+  const summaryStart = Date.now();
+  try {
+    const headlines = finalPicks
+      .map((p, i) => `${i + 1}. [${p.source}] ${p.title_en}`)
+      .join("\n");
+    const text = await azureOpenAIChat(
+      [
+        {
+          role: "system",
+          content: "You are a senior staff engineer writing a daily AI-coding briefing for product/engineering teams in Taiwan. Synthesize today's stories into ONE paragraph (≤4 sentences). Output ONLY a JSON object {\"en\":\"...\"}. English only, no Chinese.",
+        },
+        {
+          role: "user",
+          content: `Today's AI-coding stories:\n\n${headlines}\n\nGive me the meta-narrative: dominant theme, what AI-coding practitioners (Claude Code / Cursor / Copilot users) should pay attention to. ≤4 sentences English. Return JSON {"en":"..."}.`,
+        },
+      ],
+      400,
+    );
+    const j = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as { en?: string };
+    dailySummaryEn = (j.en || "").trim().slice(0, 1500) || null;
+    if (dailySummaryEn) {
+      try {
+        const [zh] = await azureTranslate([dailySummaryEn], "zh-Hant");
+        dailySummaryZh = zh.slice(0, 1500);
+      } catch (err) {
+        await log("summary", { intent: "summary-zh translator failed", level: "warn", decision: (err as Error).message.slice(0, 200) });
+      }
+    }
+    await log("summary", {
+      intent: "daily meta-narrative across picks (gpt-4o EN + translator zh-Hant)",
+      tool: "azure-openai-gpt4o",
+      output: { en_chars: dailySummaryEn?.length || 0, zh_chars: dailySummaryZh?.length || 0 },
+      duration_ms: Date.now() - summaryStart,
+    });
+  } catch (err) {
+    await log("summary", { intent: "daily summary failed", level: "warn", decision: (err as Error).message.slice(0, 200) });
+  }
+
+  // 7. PERSIST
   const rows = finalPicks.map((p, i) => ({
     project: PROJECT,
     run_id: runId,
     news_date: newsDate,
     rank: i + 1,
     source_name: p.source,
-    title_en: p.title,
+    title_en: p.title_en || p.title,
     title_zh: p.title_zh || p.title,
-    summary_en: p.summary,
-    summary_zh: p.summary_zh || p.summary,
+    summary_en: p.summary_en || String(p.summary),
+    summary_zh: p.summary_zh || String(p.summary),
     url: p.url,
     published_at: p.published_at,
     score: p.score_final != null ? p.score_final.toFixed(3) : null,
@@ -397,14 +530,17 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     output: { rank_titles: rows.map((r) => `${r.rank}: ${r.title_en.slice(0, 60)}`) },
   });
 
-  // 7. FINALIZE
-  const status: "succeeded" | "degraded" = finalPicks.length === 3 ? "succeeded" : "degraded";
+  // 8. FINALIZE
+  const status: "succeeded" | "degraded" =
+    finalPicks.length >= TARGET_PICKS ? "succeeded" : "degraded";
   await supabase
     .from("routine_runs")
     .update({
       status,
       finished_at: new Date().toISOString(),
       items_produced: finalPicks.length,
+      daily_summary_en: dailySummaryEn,
+      daily_summary_zh: dailySummaryZh,
     })
     .eq("project", PROJECT)
     .eq("run_id", runId);

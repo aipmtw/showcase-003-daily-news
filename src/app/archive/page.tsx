@@ -5,16 +5,22 @@ export const dynamic = "force-dynamic";
 
 const SOURCE_LABEL: Record<string, string> = {
   "anthropic-news": "Anthropic",
-  "techcrunch-ai": "TechCrunch",
-  "hn-24h": "Hacker News",
-  "changelog": "Claude Code",
+  "techcrunch-ai":  "TechCrunch",
+  "hn-24h":         "Hacker News",
+  "verge-ai":       "The Verge",
+  "inside-tw":      "INSIDE",
+  "lobsters-ai":    "Lobsters",
+  "changelog":      "Claude Code",
 };
 
 const SOURCE_THEME: Record<string, { bg: string; text: string; ring: string }> = {
-  "anthropic-news": { bg: "bg-amber-950", text: "text-amber-50", ring: "ring-amber-700" },
+  "anthropic-news": { bg: "bg-amber-950",   text: "text-amber-50",   ring: "ring-amber-700" },
   "techcrunch-ai":  { bg: "bg-emerald-950", text: "text-emerald-50", ring: "ring-emerald-700" },
-  "hn-24h":         { bg: "bg-orange-700", text: "text-white", ring: "ring-orange-500" },
-  "changelog":      { bg: "bg-slate-800", text: "text-slate-50", ring: "ring-slate-600" },
+  "hn-24h":         { bg: "bg-orange-700",  text: "text-white",      ring: "ring-orange-500" },
+  "verge-ai":       { bg: "bg-violet-800",  text: "text-violet-50",  ring: "ring-violet-600" },
+  "inside-tw":      { bg: "bg-rose-800",    text: "text-rose-50",    ring: "ring-rose-600" },
+  "lobsters-ai":    { bg: "bg-red-900",     text: "text-red-50",     ring: "ring-red-700" },
+  "changelog":      { bg: "bg-slate-800",   text: "text-slate-50",   ring: "ring-slate-600" },
 };
 
 export default async function ArchivePage() {
@@ -72,9 +78,9 @@ export default async function ArchivePage() {
                             rel="noreferrer"
                             className="text-xl font-semibold text-slate-900 hover:underline decoration-2 underline-offset-4 leading-snug block"
                           >
-                            {it.title_en}
+                            {it.title_zh}
                           </a>
-                          <div className="text-base text-slate-700 mt-1 leading-snug">{it.title_zh}</div>
+                          <div className="text-base text-slate-600 mt-1 leading-snug">{it.title_en}</div>
                         </div>
                       </div>
                     </li>
