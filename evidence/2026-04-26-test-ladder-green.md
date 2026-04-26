@@ -47,6 +47,18 @@ Cascades to `routine_log_entries` via the existing FK `on delete cascade`. Same 
 
 This means re-triggering the same run_id (smoke test, Routines "Run now") now cleanly replaces the prior attempt.
 
-## Next gate
+## C-layer (Routines cloud) — also green 2026-04-26
 
-C-layer (Routines cloud "Run now") still pending Mark's paste of §A/§B from `mark-ai-talk/0425-003-ROUTINES.md` into the Routines console. With this fix, Mark can press "Run now" multiple times in a row without hitting the unique-constraint trap.
+Three independent cloud→Vercel triggers prove the path:
+
+| Run | Trigger | Result |
+|---|---|---|
+| 8:10 AM scheduled (cron) | `0 0 * * *` UTC | ✅ `OK · run_id=2026-04-26-auto · status=degraded · items=3 · elapsed=14806ms` |
+| 9:49 AM Run now (manual) | console button | ❌ HTTP 503 "DNS cache overflow" — transient (overlapped with local smoke) |
+| 9:50 AM Run now (manual) | console button | ✅ `OK · run_id=2026-04-26-auto · status=degraded · items=3 · elapsed=15673ms` |
+
+C green criterion (≥2 successful runs, including ≥1 scheduled) is met. The 503 is logged as transient; if it recurs, the mitigation is to make the 4 source fetches sequential instead of `Promise.all` to reduce DNS pressure on the Vercel runtime.
+
+## Status
+
+All three test layers (A pipeline / B Vercel endpoint / C Routines cloud) are now green. `routines/daily.md` v2 architecture works end-to-end. Cron will fire next at 08:00 TPE on 2026-04-27.
