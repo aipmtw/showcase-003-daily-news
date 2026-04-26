@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "env:pull": "vercel env pull .env.local --environment=production --yes",
-    "trigger:smoke": "node -r dotenv/config scripts/smoke-trigger.mjs dotenv_config_path=.env.local"
+    "trigger:smoke": "node -r dotenv/config scripts/smoke-trigger.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
