@@ -16,6 +16,7 @@
 // full story even though the routine session itself only fired a curl.
 
 import { type SupabaseClient } from "@supabase/supabase-js";
+import { PROJECT } from "./supabase";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -178,6 +179,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
   async function log(phase: string, fields: { intent?: string; tool?: string; input?: unknown; output?: unknown; decision?: string; duration_ms?: number; level?: LogLevel } = {}) {
     seq += 1;
     const entry = {
+      project: PROJECT,
       run_id: runId,
       sequence_num: seq,
       phase,
@@ -204,9 +206,14 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
   // Same idempotency story as news_items.delete().eq("news_date", ...) below:
   // re-running for the same run_id replaces the prior attempt cleanly.
   {
-    const { error: delErr } = await supabase.from("routine_runs").delete().eq("run_id", runId);
+    const { error: delErr } = await supabase
+      .from("routine_runs")
+      .delete()
+      .eq("project", PROJECT)
+      .eq("run_id", runId);
     if (delErr) throw new Error(`routine_runs prior-delete: ${delErr.message}`);
     const { error } = await supabase.from("routine_runs").insert({
+      project: PROJECT,
       run_id: runId,
       source_type: sourceType,
       news_date: newsDate,
@@ -332,6 +339,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
         items_produced: 0,
         failure_reason: "all_sources_empty_or_drift",
       })
+      .eq("project", PROJECT)
       .eq("run_id", runId);
     await log("finalize", { intent: "Run finished · status=failed", decision: "items_produced=0, reason=all_sources_empty_or_drift" });
     return { run_id: runId, news_date: newsDate, status: "failed", items_produced: 0, log_count: seq, elapsed_ms: Date.now() - startMs, failure_reason: "all_sources_empty_or_drift" };
@@ -363,6 +371,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
 
   // 6. PERSIST
   const rows = finalPicks.map((p, i) => ({
+    project: PROJECT,
     run_id: runId,
     news_date: newsDate,
     rank: i + 1,
@@ -375,7 +384,11 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     published_at: p.published_at,
     score: p.score_final != null ? p.score_final.toFixed(3) : null,
   }));
-  await supabase.from("news_items").delete().eq("news_date", newsDate);
+  await supabase
+    .from("news_items")
+    .delete()
+    .eq("project", PROJECT)
+    .eq("news_date", newsDate);
   const { error: insErr } = await supabase.from("news_items").insert(rows);
   if (insErr) throw new Error(`news_items insert: ${insErr.message}`);
   await log("persist", {
@@ -393,6 +406,7 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
       finished_at: new Date().toISOString(),
       items_produced: finalPicks.length,
     })
+    .eq("project", PROJECT)
     .eq("run_id", runId);
   await log("finalize", { intent: `Run finished · status=${status}`, decision: `items_produced=${finalPicks.length}` });
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { PROJECT } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -105,6 +106,7 @@ export async function POST(req: Request) {
     .from("routine_runs")
     .upsert(
       {
+        project: PROJECT,
         run_id: body.run_id,
         news_date: body.news_date,
         source_type: body.source_type ?? "routine_cloud",
@@ -114,7 +116,7 @@ export async function POST(req: Request) {
         items_produced: body.items_produced ?? body.picks.length,
         failure_reason: body.failure_reason ?? null,
       },
-      { onConflict: "run_id" },
+      { onConflict: "project,run_id" },
     );
   if (runErr) {
     return NextResponse.json({ error: "runs_upsert_failed", detail: runErr.message }, { status: 500 });
@@ -122,8 +124,9 @@ export async function POST(req: Request) {
 
   // 2. Insert log entries if provided (delete any existing for idempotency)
   if (body.log_entries && body.log_entries.length > 0) {
-    await supabase.from("routine_log_entries").delete().eq("run_id", body.run_id);
+    await supabase.from("routine_log_entries").delete().eq("project", PROJECT).eq("run_id", body.run_id);
     const rows = body.log_entries.map((e) => ({
+      project: PROJECT,
       run_id: body.run_id,
       sequence_num: e.sequence_num,
       phase: e.phase,
@@ -144,8 +147,9 @@ export async function POST(req: Request) {
 
   // 3. Insert news_items (delete any existing for this date — last run wins)
   if (body.picks && body.picks.length > 0 && body.status !== "failed") {
-    await supabase.from("news_items").delete().eq("news_date", body.news_date);
+    await supabase.from("news_items").delete().eq("project", PROJECT).eq("news_date", body.news_date);
     const rows = body.picks.map((p) => ({
+      project: PROJECT,
       run_id: body.run_id,
       news_date: body.news_date,
       rank: p.rank,

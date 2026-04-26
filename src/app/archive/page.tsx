@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { supabasePublic, type NewsItem } from "@/lib/supabase";
+import { supabasePublic, PROJECT, type NewsItem } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +24,7 @@ export default async function ArchivePage() {
   const { data } = await supabase
     .from("news_items")
     .select("*")
+    .eq("project", PROJECT)
     .order("news_date", { ascending: false })
     .order("rank", { ascending: true })
     .limit(120);

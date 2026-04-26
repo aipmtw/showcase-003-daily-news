@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabasePublic } from "@/lib/supabase";
+import { supabasePublic, PROJECT } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +15,9 @@ export async function GET() {
   }
 
   const [runsRes, itemsRes, latestRes] = await Promise.all([
-    supabase.from("routine_runs").select("*", { count: "exact", head: true }),
-    supabase.from("news_items").select("*", { count: "exact", head: true }),
-    supabase.from("news_items").select("news_date").order("news_date", { ascending: false }).limit(1),
+    supabase.from("routine_runs").select("*", { count: "exact", head: true }).eq("project", PROJECT),
+    supabase.from("news_items").select("*", { count: "exact", head: true }).eq("project", PROJECT),
+    supabase.from("news_items").select("news_date").eq("project", PROJECT).order("news_date", { ascending: false }).limit(1),
   ]);
 
   return NextResponse.json({

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { supabasePublic, type RoutineRun } from "@/lib/supabase";
+import { supabasePublic, PROJECT, type RoutineRun } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +10,7 @@ export default async function RunsListPage() {
   const { data } = await supabase
     .from("routine_runs")
     .select("*")
+    .eq("project", PROJECT)
     .order("started_at", { ascending: false })
     .limit(30);
   const runs = (data ?? []) as RoutineRun[];

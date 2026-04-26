@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { supabasePublic, type RoutineRun, type RoutineLogEntry } from "@/lib/supabase";
+import { supabasePublic, PROJECT, type RoutineRun, type RoutineLogEntry } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -19,13 +19,19 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
   const supabase = supabasePublic();
   if (!supabase) return <div className="p-12 text-2xl text-slate-700">Supabase not configured.</div>;
 
-  const { data: runData } = await supabase.from("routine_runs").select("*").eq("run_id", id).limit(1);
+  const { data: runData } = await supabase
+    .from("routine_runs")
+    .select("*")
+    .eq("project", PROJECT)
+    .eq("run_id", id)
+    .limit(1);
   const run = runData?.[0] as RoutineRun | undefined;
   if (!run) notFound();
 
   const { data: entriesData } = await supabase
     .from("routine_log_entries")
     .select("*")
+    .eq("project", PROJECT)
     .eq("run_id", id)
     .order("sequence_num", { ascending: true });
   const entries = (entriesData ?? []) as RoutineLogEntry[];

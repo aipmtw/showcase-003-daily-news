@@ -1,5 +1,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+// Single source of truth for the multi-tenant discriminator added by
+// supabase migration 0002. Every read filters on this; every write sets it.
+// Sibling repos (004 / future showcases) declare their own value here.
+export const PROJECT = "showcase-003-daily-news" as const;
+
 // Public (anon-key) client — safe for SSR and client components.
 // Returns null if env not configured (e.g. during first Vercel deploy before
 // Mark has pasted secrets). Callers should handle null by showing an empty
