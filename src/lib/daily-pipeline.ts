@@ -249,14 +249,18 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     }
   }
 
-  // 3. SCORE — per source, parallel within source, sources sequential to limit concurrency
-  const picks: Candidate[] = [];
+  // 3. SCORE — score TOP K candidates per source, then rank globally and take
+  // top 3 unique. Each source contributes K candidates (not 1 pick) so that if
+  // one source returns 0 (e.g. HTML drift), the others fill in to keep total=3.
+  // Hard requirement: every daily run must produce exactly 3 items.
+  const PER_SOURCE_K = 4;
+  const allScored: Candidate[] = [];
   for (const f of fetched) {
     if (!f.candidates.length) {
       if (!f.error) await log("score", { intent: `rank ${f.name}`, decision: "no candidates", level: "warn" });
       continue;
     }
-    const top = f.candidates.slice(0, 4);
+    const top = f.candidates.slice(0, PER_SOURCE_K);
     const scoreStart = Date.now();
     const scored = await Promise.all(
       top.map(async (c) => {
@@ -279,35 +283,43 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
       }),
     );
     scored.sort((a, b) => (b.score_final ?? 0) - (a.score_final ?? 0));
-    const pick = scored[0];
-    picks.push(pick);
+    allScored.push(...scored);
     await log("score", {
       intent: `rank ${f.name}`,
       tool: "azure-openai-gpt4o",
       input: { candidates: top.length },
       output: { top3: scored.slice(0, 3).map((s) => ({ title: s.title.slice(0, 80), score: (s.score_final ?? 0).toFixed(3) })) },
-      decision: `pick: ${pick.title.slice(0, 100)} (score=${(pick.score_final ?? 0).toFixed(3)})`,
+      decision: `top of ${f.name}: ${scored[0].title.slice(0, 100)} (score=${(scored[0].score_final ?? 0).toFixed(3)})`,
       duration_ms: Date.now() - scoreStart,
     });
   }
 
-  // 4. DEDUP
-  const canonical = new Map<string, Candidate>();
-  for (const p of picks) {
-    const key = (p.url || p.title).toLowerCase().replace(/\?.*$/, "").replace(/\/$/, "");
-    if (!canonical.has(key)) canonical.set(key, p);
+  // 4. AGGREGATE — global ranking, dedup by URL, take top 3.
+  // (Every source contributed K candidates above; we rank across all of them.)
+  allScored.sort((a, b) => (b.score_final ?? 0) - (a.score_final ?? 0));
+  const seen = new Set<string>();
+  const deduped: Candidate[] = [];
+  for (const c of allScored) {
+    const key = (c.url || c.title).toLowerCase().replace(/\?.*$/, "").replace(/\/$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(c);
+    if (deduped.length === 3) break;
   }
-  const deduped = [...canonical.values()];
 
   await log("aggregate", {
-    intent: "aggregate + dedup picks across sources",
-    output: { sources_delivered: picks.length, after_dedup: deduped.length },
+    intent: "global rank + dedup top 3 across all sources",
+    output: {
+      total_scored: allScored.length,
+      after_dedup: deduped.length,
+      sources_in_picks: [...new Set(deduped.map((d) => d.source))],
+    },
     decision:
-      deduped.length < 2
-        ? "FAILED — dedup floor breach (<2)"
-        : deduped.length < 3
-          ? "DEGRADED — fewer than 3 unique picks"
-          : "OK — 3 unique picks",
+      deduped.length === 3
+        ? "OK — 3 unique picks (target reached)"
+        : deduped.length === 2
+          ? "DEGRADED — only 2 unique candidates total across sources"
+          : "FAILED — fewer than 2 unique candidates",
     level: deduped.length < 2 ? "error" : deduped.length < 3 ? "warn" : "info",
   });
 
@@ -318,15 +330,15 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
         status: "failed",
         finished_at: new Date().toISOString(),
         items_produced: 0,
-        failure_reason: "dedup_floor_breach",
+        failure_reason: "all_sources_empty_or_drift",
       })
       .eq("run_id", runId);
-    await log("finalize", { intent: "Run finished · status=failed", decision: "items_produced=0, reason=dedup_floor_breach" });
-    return { run_id: runId, news_date: newsDate, status: "failed", items_produced: 0, log_count: seq, elapsed_ms: Date.now() - startMs, failure_reason: "dedup_floor_breach" };
+    await log("finalize", { intent: "Run finished · status=failed", decision: "items_produced=0, reason=all_sources_empty_or_drift" });
+    return { run_id: runId, news_date: newsDate, status: "failed", items_produced: 0, log_count: seq, elapsed_ms: Date.now() - startMs, failure_reason: "all_sources_empty_or_drift" };
   }
 
   // 5. TRANSLATE
-  const finalPicks = deduped.slice(0, 3);
+  const finalPicks = deduped;
   {
     const { result: translated, duration_ms } = await timed(async () => {
       const titles = finalPicks.map((p) => p.title);
