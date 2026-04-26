@@ -223,8 +223,12 @@ export async function runDailyPipeline(opts: PipelineOpts): Promise<PipelineResu
     return { result, duration_ms: Date.now() - t0 };
   }
 
-  // 1. INIT
+  // 1. INIT — replace-on-rerun (cascades log_entries via FK).
+  // Same idempotency story as news_items.delete().eq("news_date", ...) below:
+  // re-running for the same run_id replaces the prior attempt cleanly.
   {
+    const { error: delErr } = await supabase.from("routine_runs").delete().eq("run_id", runId);
+    if (delErr) throw new Error(`routine_runs prior-delete: ${delErr.message}`);
     const { error } = await supabase.from("routine_runs").insert({
       run_id: runId,
       source_type: sourceType,
