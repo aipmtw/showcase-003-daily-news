@@ -104,6 +104,23 @@ async function azureTranslate(texts: string[], to: "zh-Hant" | "en" = "zh-Hant")
 const AI_CODING_KEYWORDS =
   /claude|anthropic|copilot|cursor|codex|gpt|llm|coding agent|ai coding|mcp|model context protocol|agentic|开发|開發|程式碼|程序员|工程師|軟體開發|軟件開發|代码|大模型|生成式|prompt|aider|tabnine|sourcegraph|llama|gemini|deepseek|mistral|grok/i;
 
+// Decode HTML entities (named + numeric) so feeds like Lobsters that ship
+// entity-encoded markup inside <description> don't leak `&lt;p&gt;` literals
+// into summaries. Order: numeric first, then named, &amp; LAST to avoid
+// double-decoding (`&amp;lt;` → `&lt;` → `<`). See:
+// backlog/2026-04-29-encoding-regressions-on-003-live.md
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
 // Generic RSS parser — same shape as 004's. Pulls <item><title><link><description><pubDate>.
 function parseRssItems(xml: string, source: string, opts?: { native_zh?: boolean; max?: number }): Candidate[] {
   const max = opts?.max ?? 25;
@@ -114,7 +131,9 @@ function parseRssItems(xml: string, source: string, opts?: { native_zh?: boolean
     const block = m[1];
     const grab = (tag: string) => {
       const r = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`));
-      return r ? r[1].replace(/<[^>]+>/g, "").trim() : "";
+      if (!r) return "";
+      // decode entities first, then strip any tags revealed by decoding.
+      return decodeHtmlEntities(r[1]).replace(/<[^>]+>/g, "").trim();
     };
     const title = grab("title");
     const link = grab("link");
@@ -168,9 +187,9 @@ async function fetchTechcrunchAi(): Promise<Candidate[]> {
   let m: RegExpExecArray | null;
   while ((m = itemRe.exec(xml)) !== null) {
     const block = m[1];
-    const title = (block.match(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/)?.[1] || "").trim();
-    const link = (block.match(/<link>(.*?)<\/link>/)?.[1] || "").trim();
-    const desc = (block.match(/<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/)?.[1] || "")
+    const title = decodeHtmlEntities((block.match(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/)?.[1] || "")).trim();
+    const link = decodeHtmlEntities((block.match(/<link>(.*?)<\/link>/)?.[1] || "")).trim();
+    const desc = decodeHtmlEntities((block.match(/<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/)?.[1] || ""))
       .replace(/<[^>]+>/g, "")
       .trim()
       .slice(0, 250);
